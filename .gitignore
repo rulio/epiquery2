@@ -1,7 +1,7 @@
 *.swp
 *.bs
-difftest/templates/
 difftest/results/*
 ./templates/
 node_modules/
 pids/
+newrelic_agent.log

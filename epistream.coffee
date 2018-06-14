@@ -1,6 +1,7 @@
 #! /usr/bin/env ./node_modules/.bin/coffee
 # vim:ft=coffee
 
+newrelic  = require 'newrelic'
 cluster   = require 'cluster'
 express   = require 'express'
 _         = require 'underscore'
@@ -37,6 +38,8 @@ if config.isDevelopmentMode()
     res.header 'Access-Control-Allow-Credentials', true
     res.header 'Access-Control-Allow-Headers', 'Content-Type'
     res.header('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    # allow preflight calls to cache for 1 hour
+    res.header 'Access-Control-Max-Age', '3600'
     next()
   app.use set_cors_headers
   app.all '*', set_cors_headers
@@ -47,7 +50,7 @@ app.get '/diagnostic', (req, res) ->
   response =
     message: "ok"
     connections: _.pluck(config.connections, 'name')
-  if config.isDevelopmentMode
+  if config.isDevelopmentMode()
     response.aclsEnabled = config.enableTemplateAcls
   res.send response
 
@@ -73,6 +76,7 @@ app.get '/stats', (req, res) ->
 httpRequestHandler = (req, res) ->
   clientId = req.param 'client_id'
   c = new Context()
+  newrelic.setTransactionName(req.path.replace(/^\/+/g, ''))
   c.queryId = req.param 'queryId'
   _.extend c, httpClient.getQueryRequestInfo(req, !!apiKey)
   # Check that the client supplied key matches server key
@@ -80,10 +84,12 @@ httpRequestHandler = (req, res) ->
     if !(c.clientKey == apiKey)
       log.error "Unauthorized HTTP Access Attempted from IP: #{req.connection.remoteAddress}"
       log.error "Unauthorized Context: #{JSON.stringify(c.templateContext)}"
+      newrelic.noticeError(new Error("Unauthorized Socket Access Attempted"), c)
       res.send error: "Unauthorized Access"
       return
 
   if c.connectionName and not config.connections[c.connectionName]
+    newrelic.noticeError(new Error("Unable to find connection by name"), c)
     res.send error: "unable to find connection by name '#{c.connectionName}'"
     return
   httpClient.attachResponder c, res
@@ -92,12 +98,13 @@ httpRequestHandler = (req, res) ->
 
 socketServer.on 'connection', (conn) ->
   conn.on 'data', (message) ->
-
+    newrelic.startWebTransaction(message.templateName)
     if apiKey
       if !~ conn.url.indexOf apiKey
-        conn.close()
+        conn.close() 
         log.error "Unauthorized Socket Access Attempted from IP: #{conn.remoteAddress}"
         log.error "Unauthorized Context: #{JSON.stringify(message)}"
+        newrelic.noticeError(new Error("Unauthorized Socket Access Attempted"), message)
         return
 
     log.debug "inbound message #{message}"
@@ -114,16 +121,20 @@ socketServer.on 'connection', (conn) ->
       requestHeaders: conn.headers
     ctxParms.debug if message.debug
     context = new Context(ctxParms)
+    newrelic.setTransactionName(context.templateName.replace(/^\/+/g, ''))
+    newrelic.addCustomAttributes(context)
     log.debug "[q:#{context.queryId}] starting processing"
     sockjsClient.attachResponder(context, conn)
     queryRequestHandler(context)
   conn.on 'error', (e) ->
     log.error "error on connection", e
+    newrelic.noticeError(e)
   conn.on 'close', () ->
     log.debug "sockjs client disconnected"
 
 socketServer.on 'error', (e) ->
   log.error "error on socketServer", e
+  newrelic.noticeError(e)
 
 app.get /\/(.+)$/, httpRequestHandler
 app.post /\/(.+)$/, httpRequestHandler
@@ -140,5 +151,12 @@ prefix.prefix = "/#{apiKey}/sockjs" if apiKey && config.urlBasedApiKey
 socketServer.installHandlers(server, prefix)
 
 Cluster = require 'cluster2'
-cluster = new Cluster(port: config.port, noWorkers:config.forks, timeout:config.httpRequestTimeoutInSeconds * 1000)
+if config.isDevelopmentMode() and config.forks is 1
+  log.warn  "********************************************************************************"
+  log.warn "epiquery is running in development mode with a single fork specified, this results in a single process epiquery which will BE SLOW"
+  log.warn "********************************************************************************"
+  cluster = new Cluster(port: config.port, cluster:false, timeout:config.httpRequestTimeoutInSeconds * 1000)
+else
+  cluster = new Cluster(port: config.port, noWorkers:config.forks, timeout:config.httpRequestTimeoutInSeconds * 1000)
+
 cluster.listen (cb) -> cb(server)
