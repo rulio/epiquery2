@@ -177,7 +177,7 @@ executeQuery = (context, callback) ->
   queryCompleteCallback = (err, data) ->
     context.Stats.endDate = new Date()
     if err
-      log.error "[q:#{context.queryId}, t:#{context.templateName}] error executing query #{err}"
+      log.error "[q:#{context.queryId}, t:#{context.templateName}] error executing query #{err}"       
       newrelic.noticeError(err, context)
       context.emit 'error', err, data
 
@@ -242,7 +242,11 @@ queryRequestHandler = (context) ->
   (err, results) ->
     if err
       log.error "[q:#{context.queryId}, t:#{context.templateName}] queryRequestHandler Error: #{err}"
-      newrelic.noticeError(err, context)
+      nrContext = JSON.parse(JSON.stringify(context))
+      if(nrContext.connection && nrContext.connection.config && nrContext.connection.config.password)
+        nrContext.connection.config.password ='********'
+
+      newrelic.noticeError(err, nrContext)
       context.emit 'error', err
     context.emit 'completequeryexecution'
 
